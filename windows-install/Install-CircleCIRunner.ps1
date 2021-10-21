@@ -85,6 +85,8 @@ Write-Host "Preparing a config template for CircleCI Launch Agent"
 @"
 api:
   auth_token: "" # FIXME: Specify your runner token
+  # On server, set url to the hostname of your server installation. For example,
+  # url: https://circleci.example.com
 runner:
   name: "" # FIXME: Specify the name of this runner instance
   mode: single-task
