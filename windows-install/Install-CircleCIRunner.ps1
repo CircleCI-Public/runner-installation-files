@@ -85,11 +85,15 @@ Write-Host "Preparing a config template for CircleCI Launch Agent"
 @"
 api:
   auth_token: "" # FIXME: Specify your runner token
+  # On server, set url to the hostname of your server installation. For example,
+  # url: https://circleci.example.com
 runner:
   name: "" # FIXME: Specify the name of this runner instance
   mode: single-task
   working_directory: C:\Users\circleci\AppData\Local\Temp\%s
   cleanup_working_directory: true
+logging:
+  file: $installDirPath\circleci-runner.log
 "@ -replace "([^`r])`n", "`$1`r`n" | Out-File launch-agent-config.yaml -Encoding ascii
 
 # Open launch-agent-config.yaml for edit
