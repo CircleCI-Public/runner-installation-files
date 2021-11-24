@@ -10,14 +10,12 @@ sudo mkdir -p "${prefix}/workdir"
 [[ -z ${platform+z} ]] && echo "platform not defined" && exit 1
 [[ -z ${CIRCLECI_RUNNER_TOKEN+z} ]] && echo "CIRCLECI_RUNNER_TOKEN not defined" && exit 1
 
-
 # Downloading launch agent
 echo "Using CircleCI Launch Agent version ${agent_version}"
 echo "Downloading and verifying CircleCI Launch Agent Binary"
 
 IFS="/" read -r -a split_platform <<<"${platform}"
 download_response=$(curl -H "Authorization: Bearer ${CIRCLECI_RUNNER_TOKEN}" -H "Accept: application/json" -H "Content-Type: application/json" --data "{\"os\":\"${split_platform[0]}\", \"arch\":\"${split_platform[1]}\", \"version\":\"${agent_version}\"}" --request GET ${runner_url}/api/v2/launch-agent/download)
-echo ${download_response}
 url=$(echo "${download_response}" | jq -r .url)
 checksum=$(echo "${download_response}" | jq -r .checksum)
 
