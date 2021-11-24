@@ -20,7 +20,7 @@ download_url=$(echo "${download_response}" | jq -r .url)
 checksum=$(echo "${download_response}" | jq -r .checksum)
 
 IFS="/" read -r -a split_download_url <<<"${download_url}"
-file=${split_download_url[${#split_download_url[@]} - 1]}
+file="${platform}/${split_download_url[${#split_download_url[@]} - 1]}"
 mkdir -p "${platform}"
 echo "Downloading CircleCI Launch Agent: ${file}"
 curl --compressed -L "${download_url}" -o "${file}"
