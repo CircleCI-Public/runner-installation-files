@@ -30,7 +30,7 @@ Write-Host "Determining latest version of CircleCI Launch Agent"
 $agentVer = (Invoke-WebRequest "$agentDist/release.txt").Content.Trim()
 Write-Host "Using CircleCI Launch Agent version $agentVer"
 Write-Host "Downloading and verifying CircleCI Launch Agent Binary"
-$agentChecksum = ((Invoke-WebRequest "$agentDist/$agentVer/checksums.txt").Content.Split([System.Environment]::NewLine) | Select-String $platform).Line.Split(" ")
+$agentChecksum = ((Invoke-WebRequest "$agentDist/$agentVer/checksums.txt").Content.Split("`n") | Select-String $platform).Line.Split(" ")
 $agentHash = $agentChecksum[0]
 $agentFile = $agentChecksum[1].Split("/")[-1]
 Write-Host "Downloading CircleCI Launch Agent: $agentFile"
