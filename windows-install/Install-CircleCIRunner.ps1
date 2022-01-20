@@ -1,3 +1,17 @@
+function Random-Password($length, $minNonAlpha) {
+  $charlist = [char]94..[char]126 + [char]65..[char]90 + [char]47..[char]57
+  $nonAlpha = [char]94..[char]96 + [char]123..[char]126 + [char]33..[char]47
+  $pwdList = @()
+  For ($i = 0; $i -lt $minNonAlpha; $i++) {
+    $pwdList += $nonAlpha | Get-Random
+  }
+  For ($i = 0; $i -lt [int]$length - [int]$minNonAlpha; $i++) {
+    $pwdList += $charlist | Get-Random
+  }
+  $pwdList = $pwdList | Sort-Object { Get-Random }
+  -join $pwdList
+}
+
 $ErrorActionPreference = "Stop"
 
 $platform = "windows/amd64"
@@ -42,9 +56,8 @@ if ((Get-FileHash "$agentFile" -Algorithm SHA256).Hash.ToLower() -ne $agentHash.
 
 # NT credentials to use
 Write-Host "Generating a random password"
-Add-Type -AssemblyName System.Web
 $username = "circleci"
-$passwd = [System.Web.Security.Membership]::GeneratePassword(42, 10)
+$passwd = Random-Password 42 10
 $passwdSecure = $(ConvertTo-SecureString -String $passwd -AsPlainText -Force)
 $cred = New-Object System.Management.Automation.PSCredential ($username, $passwdSecure)
 
