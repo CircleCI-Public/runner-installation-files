@@ -1,15 +1,24 @@
 function Random-Password($length, $minNonAlpha) {
-  $charlist = [char]94..[char]126 + [char]65..[char]90 + [char]47..[char]57
-  $nonAlpha = [char]94..[char]96 + [char]123..[char]126 + [char]33..[char]47
+  $alpha = [char]65..[char]90 + [char]97..[char]122
+  $numeric  =  [char]48..[char]57
+  # :;<=>?@!#$%&()*+,-./[\]^_`
+  $symbols = [char]58..[char]64 + @([char]33) + [char]35..[char]38 + [char]40..[char]47 + [char]91..[char]96
+
+  $nonAlpha = $numeric + $symbols
+  $charSet = $alpha + $nonAlpha
+
   $pwdList = @()
   For ($i = 0; $i -lt $minNonAlpha; $i++) {
     $pwdList += $nonAlpha | Get-Random
   }
-  For ($i = 0; $i -lt [int]$length - [int]$minNonAlpha; $i++) {
-    $pwdList += $charlist | Get-Random
+  For ($i = 0; $i -lt ($length - $minNonAlpha); $i++) {
+    $pwdList += $charSet | Get-Random
   }
+
   $pwdList = $pwdList | Sort-Object { Get-Random }
-  -join $pwdList
+
+  # a bug on Server 2016 joins as stringified integers unles we cast to [char[]]
+  ([char[]] $pwdList) -join ""
 }
 
 $ErrorActionPreference = "Stop"
