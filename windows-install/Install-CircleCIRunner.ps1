@@ -112,7 +112,7 @@ api:
 runner:
   name: "" # FIXME: Specify the name of this runner instance
   mode: single-task
-  working_directory: C:\Users\circleci\AppData\Local\Temp\%s
+  working_directory: $env:ProgramFiles\CircleCI\Workdir
   cleanup_working_directory: true
 logging:
   file: $installDirPath\circleci-runner.log
