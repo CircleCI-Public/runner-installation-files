@@ -6,13 +6,12 @@ echo "Installing CircleCI Runner for ${platform}"
 
 base_url="https://circleci-binary-releases.s3.amazonaws.com/circleci-launch-agent"
 if [ -z ${agent_version+x} ]; then
-  agent_version=$(curl "${base_url}/release.txt")
+    agent_version=$(curl "${base_url}/release.txt")
 fi
 
-# Set up runner directory
-echo "Setting up CircleCI Runner directory"
-prefix=/var/opt/circleci
-sudo mkdir -p "${prefix}/workdir"
+# Set up the runner directories
+echo "Setting up CircleCI Runner directories"
+sudo mkdir -p /var/opt/circleci /opt/circleci
 
 # Downloading launch agent
 echo "Using CircleCI Launch Agent version ${agent_version}"
@@ -26,4 +25,4 @@ curl --compressed -L "${base_url}/${agent_version}/${file}" -o "${file}"
 # Verifying download
 echo "Verifying CircleCI Launch Agent download"
 grep "${file}" checksums.txt | sha256sum --check && chmod +x "${file}"
-sudo cp "${file}" "${prefix}/circleci-launch-agent" || echo "Invalid checksum for CircleCI Launch Agent, please try download again"
+sudo cp "${file}" "/opt/circleci/circleci-launch-agent" || echo "Invalid checksum for CircleCI Launch Agent, please try download again"
