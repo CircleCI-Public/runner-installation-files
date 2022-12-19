@@ -28,7 +28,7 @@ $installDirPath = "$env:ProgramFiles\CircleCI"
 
 # Install Chocolatey
 Write-Host "Installing Chocolatey as a prerequisite"
-Invoke-Expression ((Invoke-WebRequest "https://chocolatey.org/install.ps1").Content)
+Invoke-Expression ((Invoke-WebRequest "https://chocolatey.org/install.ps1" -UseBasicParsing).Content)
 Write-Host ""
 
 # Install Git
@@ -50,14 +50,14 @@ Push-Location "$installDirPath"
 # Download launch-agent
 $agentDist = "https://circleci-binary-releases.s3.amazonaws.com/circleci-launch-agent"
 Write-Host "Determining latest version of CircleCI Launch Agent"
-$agentVer = (Invoke-WebRequest "$agentDist/release.txt").Content.Trim()
+$agentVer = (Invoke-WebRequest "$agentDist/release.txt" -UseBasicParsing).Content.Trim()
 Write-Host "Using CircleCI Launch Agent version $agentVer"
 Write-Host "Downloading and verifying CircleCI Launch Agent Binary"
-$agentChecksum = ((Invoke-WebRequest "$agentDist/$agentVer/checksums.txt").Content.Split("`n") | Select-String $platform).Line.Split(" ")
+$agentChecksum = ((Invoke-WebRequest "$agentDist/$agentVer/checksums.txt" -UseBasicParsing).Content.Split("`n") | Select-String $platform).Line.Split(" ")
 $agentHash = $agentChecksum[0]
 $agentFile = $agentChecksum[1].Split("/")[-1]
 Write-Host "Downloading CircleCI Launch Agent: $agentFile"
-Invoke-WebRequest "$agentDist/$agentVer/$platform/$agentFile" -OutFile "$agentFile"
+Invoke-WebRequest "$agentDist/$agentVer/$platform/$agentFile" -OutFile "$agentFile" -UseBasicParsing
 Write-Host "Verifying CircleCI Launch Agent download"
 if ((Get-FileHash "$agentFile" -Algorithm SHA256).Hash.ToLower() -ne $agentHash.ToLower()) {
     throw "Invalid checksum for CircleCI Launch Agent, please try download again"
