@@ -2,8 +2,8 @@ $installDirPath = "$env:ProgramFiles\CircleCI"
 $username = "circleci"
 
 Write-Host "Unregister Scheduled Tasks"
-Unregister-ScheduledTask -TaskName "CircleCI Launch Agent session keeper" -Confirm:$false
-Unregister-ScheduledTask -TaskName "CircleCI Launch Agent"  -Confirm:$false
+Unregister-ScheduledTask -TaskName "CircleCI Runner Agent session keeper" -Confirm:$false
+Unregister-ScheduledTask -TaskName "CircleCI RUnner Agent"  -Confirm:$false
 
 Write-Host "Delete credential from Credential Manager"
 cmdkey.exe /delete:TERMSRV/localhost
