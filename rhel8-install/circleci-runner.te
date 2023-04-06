@@ -1,4 +1,4 @@
-policy_module(circleci_runner_agent, 1.0.0)
+policy_module(circleci-runner, 1.0.0)
 
 ########################################
 #
