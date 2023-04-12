@@ -41,27 +41,29 @@ Write-Host "Installing Gzip, which is required to run CircleCI jobs"
 choco install -y gzip
 Write-Host ""
 
-Write-Host "Installing CircleCI Launch Agent to $installDirPath"
+Write-Host "Installing CircleCI Runner Agent to $installDirPath"
 
 # mkdir
 [void](New-Item "$installDirPath" -ItemType Directory -Force)
 Push-Location "$installDirPath"
 
-# Download launch-agent
-$agentDist = "https://circleci-binary-releases.s3.amazonaws.com/circleci-launch-agent"
-Write-Host "Determining latest version of CircleCI Launch Agent"
-$agentVer = (Invoke-WebRequest "$agentDist/release.txt").Content.Trim()
-Write-Host "Using CircleCI Launch Agent version $agentVer"
-Write-Host "Downloading and verifying CircleCI Launch Agent Binary"
-$agentChecksum = ((Invoke-WebRequest "$agentDist/$agentVer/checksums.txt").Content.Split("`n") | Select-String $platform).Line.Split(" ")
-$agentHash = $agentChecksum[0]
-$agentFile = $agentChecksum[1].Split("/")[-1]
-Write-Host "Downloading CircleCI Launch Agent: $agentFile"
-Invoke-WebRequest "$agentDist/$agentVer/$platform/$agentFile" -OutFile "$agentFile"
-Write-Host "Verifying CircleCI Launch Agent download"
-if ((Get-FileHash "$agentFile" -Algorithm SHA256).Hash.ToLower() -ne $agentHash.ToLower()) {
-    throw "Invalid checksum for CircleCI Launch Agent, please try download again"
+# Download runner-agent
+$manifestDist = "https://circleci-binary-releases.s3.amazonaws.com/circleci-runner/manifest.json"
+Write-Host "Getting download url from manifest file"
+$windowsManifest = (Invoke-RestMethod -Uri "$manifestDist").releases.current.windows.amd64
+$downloadUrl = $windowsManifest.url
+Write-Host "Download url: $downloadUrl"
+$agentHash = $windowsManifest.sha256
+Write-Host "agent hash : $agentHash"
+$tarAgentFile = $downloadUrl.split("/")[-1]
+$agentFile = $tarAgentFile.split("_")[0]
+Write-Host "Downloading CircleCI Runner Agent: $tarAgentFile"
+Invoke-WebRequest "$downloadUrl" -OutFile "$tarAgentFile"
+Write-Host "Verifying CircleCI Runner Agent download"
+if ((Get-FileHash "$tarAgentFile" -Algorithm SHA256).Hash.ToLower() -ne $agentHash.ToLower()) {
+    throw "Invalid checksum for CircleCI Runner Agent, please try download again"
 }
+tar -xvf "$tarAgentFile"
 
 # NT credentials to use
 Write-Host "Generating a random password"
@@ -97,36 +99,34 @@ Start-Process reg.exe -ArgumentList ("ADD", '"HKCU\Software\Microsoft\Terminal S
 Start-Process reg.exe -ArgumentList ("ADD", '"HKCU\Software\Microsoft\ServerManager"', "/v", "DoNotOpenServerManagerAtLogon", "/t", "REG_DWORD", "/d", "0x1", "/f") -Credential $cred
 
 # Configure scheduled tasks to run launch-agent
-Write-Host "Registering CircleCI Launch Agent tasks to Task Scheduler"
+Write-Host "Registering CircleCI Runner Agent tasks to Task Scheduler"
 $commonTaskSettings = New-ScheduledTaskSettingsSet -Compatibility Vista -AllowStartIfOnBatteries -ExecutionTimeLimit (New-TimeSpan)
-[void](Register-ScheduledTask -Force -TaskName "CircleCI Launch Agent" -User $username -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument "-Command `"& `"`"$installDirPath\$agentFile`"`"`"`" --config `"`"$installDirPath\launch-agent-config.yaml`"`"`"; & logoff.exe (Get-Process -Id `$PID).SessionID`"") -Settings $commonTaskSettings -Trigger (New-ScheduledTaskTrigger -AtLogon -User $username) -RunLevel Highest)
-$keeperTask = Register-ScheduledTask -Force -TaskName "CircleCI Launch Agent session keeper" -User $username -Password $passwd -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument "-Command `"while (`$true) { if ((query session $username).Length -eq 0) { mstsc.exe /v:localhost; Start-Sleep 5 } Start-Sleep 1 }`"") -Settings $commonTaskSettings -Trigger (New-ScheduledTaskTrigger -AtStartup)
+[void](Register-ScheduledTask -Force -TaskName "CircleCI Runner Agent" -User $username -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument "-Command `"& `"`"$installDirPath\$agentFile`"`"`"`" machine --config `"`"$installDirPath\runner-agent-config.yaml`"`"`"; & logoff.exe (Get-Process -Id `$PID).SessionID`"") -Settings $commonTaskSettings -Trigger (New-ScheduledTaskTrigger -AtLogon -User $username) -RunLevel Highest)
+$keeperTask = Register-ScheduledTask -Force -TaskName "CircleCI Runner Agent session keeper" -User $username -Password $passwd -Action (New-ScheduledTaskAction -Execute powershell.exe -Argument "-Command `"while (`$true) { if ((query session $username).Length -eq 0) { mstsc.exe /v:localhost; Start-Sleep 5 } Start-Sleep 1 }`"") -Settings $commonTaskSettings -Trigger (New-ScheduledTaskTrigger -AtStartup)
 
 # Preparing config template
-Write-Host "Preparing a config template for CircleCI Launch Agent"
+Write-Host "Preparing a config template for CircleCI Runner Agent"
 @"
 api:
-  auth_token: "" # FIXME: Specify your runner token
   # On server, set url to the hostname of your server installation. For example,
   # url: https://circleci.example.com
 runner:
   name: "" # FIXME: Specify the name of this runner instance
-  mode: single-task
-  working_directory: $env:ProgramFiles\CircleCI\Workdir
-  cleanup_working_directory: true
-logging:
-  file: $installDirPath\circleci-runner.log
-"@ -replace "([^`r])`n", "`$1`r`n" | Out-File launch-agent-config.yaml -Encoding ascii
+  resource_class:
+    token: "" # FIXME: Specify your runner token
+    working_directory: /var/opt/circleci/workdir
+    cleanup_working_directory: true
+"@ -replace "([^`r])`n", "`$1`r`n" | Out-File runner-agent-config.yaml -Encoding ascii
 
-# Open launch-agent-config.yaml for edit
-Write-Host "Opening the config file for CircleCI Launch Agent in Notepad"
+# Open runner-agent-config.yaml for edit
+Write-Host "Opening the config file for CircleCI Runner Agent in Notepad"
 Write-Host ""
 Write-Host "Please edit the file accordingly and close Notepad"
-(Start-Process notepad.exe -ArgumentList ("`"$installDirPath\launch-agent-config.yaml`"") -PassThru).WaitForExit()
+(Start-Process notepad.exe -ArgumentList ("`"$installDirPath\runner-agent-config.yaml`"") -PassThru).WaitForExit()
 Write-Host ""
 
 # Start runner!
-Write-Host "Starting CircleCI Launch Agent"
+Write-Host "Starting CircleCI Runner Agent"
 Pop-Location
 Start-ScheduledTask -InputObject $keeperTask
 Write-Host ""
