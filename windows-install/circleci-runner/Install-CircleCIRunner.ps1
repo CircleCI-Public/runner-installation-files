@@ -108,14 +108,14 @@ $keeperTask = Register-ScheduledTask -Force -TaskName "CircleCI Runner Agent ses
 Write-Host "Preparing a config template for CircleCI Runner Agent"
 @"
 api:
+  auth_token: "" # FIXME: Specify your runner token
   # On server, set url to the hostname of your server installation. For example,
   # url: https://circleci.example.com
 runner:
   name: "" # FIXME: Specify the name of this runner instance
-  resource_class:
-    token: "" # FIXME: Specify your runner token
-    working_directory: /var/opt/circleci/workdir
-    cleanup_working_directory: true
+  task_agent_directory: $env:ProgramFiles\CircleCI
+  working_directory: $env:ProgramFiles\CircleCI\Workdir
+  cleanup_working_directory: true
 "@ -replace "([^`r])`n", "`$1`r`n" | Out-File runner-agent-config.yaml -Encoding ascii
 
 # Open runner-agent-config.yaml for edit
