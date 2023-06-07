@@ -28,7 +28,7 @@ $installDirPath = "$env:ProgramFiles\CircleCI"
 
 # Install Chocolatey
 Write-Host "Installing Chocolatey as a prerequisite"
-Invoke-Expression ((Invoke-WebRequest "https://chocolatey.org/install.ps1").Content)
+Invoke-Expression ((Invoke-WebRequest "https://chocolatey.org/install.ps1" -UseBasicParsing).Content)
 Write-Host ""
 
 # Install Git
@@ -47,23 +47,25 @@ Write-Host "Installing CircleCI Runner Agent to $installDirPath"
 [void](New-Item "$installDirPath" -ItemType Directory -Force)
 Push-Location "$installDirPath"
 
-# Download runner-agent
+# Download CircleCI runner agent binary
 $manifestDist = "https://circleci-binary-releases.s3.amazonaws.com/circleci-runner/manifest.json"
-Write-Host "Getting download url from manifest file"
+Write-Host "Determining current version of CircleCI Runner Agent"
 $windowsManifest = (Invoke-RestMethod -Uri "$manifestDist").releases.current.windows.amd64
+Write-Host "Downloading and verifying CircleCI Runner Agent binary"
 $downloadUrl = $windowsManifest.url
-Write-Host "Download url: $downloadUrl"
 $agentHash = $windowsManifest.sha256
-Write-Host "agent hash : $agentHash"
-$tarAgentFile = $downloadUrl.split("/")[-1]
-$agentFile = $tarAgentFile.split("_")[0]
-Write-Host "Downloading CircleCI Runner Agent: $tarAgentFile"
-Invoke-WebRequest "$downloadUrl" -OutFile "$tarAgentFile"
-Write-Host "Verifying CircleCI Runner Agent download"
-if ((Get-FileHash "$tarAgentFile" -Algorithm SHA256).Hash.ToLower() -ne $agentHash.ToLower()) {
-    throw "Invalid checksum for CircleCI Runner Agent, please try download again"
+Write-Host "Download URL: $downloadUrl"
+Write-Host "SHA256 hash: $agentHash"
+$tarFile = $downloadUrl.split("/")[-1]
+$agentFile = $tarFile.split("_")[0]
+Write-Host "Downloading CircleCI Runner Agent binary archive: $tarFile"
+Invoke-WebRequest "$downloadUrl" -OutFile "$tarFile" -UseBasicParsing
+Write-Host "Verifying CircleCI Runner Agent binary download"
+if ((Get-FileHash "$tarFile" -Algorithm SHA256).Hash.ToLower() -ne $agentHash.ToLower()) {
+    throw "Invalid checksum for CircleCI Runner Agent binary, please try download again"
 }
-tar -xvf "$tarAgentFile"
+tar -xvf "$tarFile"
+Remove-Item "$tarFile"
 
 # NT credentials to use
 Write-Host "Generating a random password"
@@ -108,14 +110,17 @@ $keeperTask = Register-ScheduledTask -Force -TaskName "CircleCI Runner Agent ses
 Write-Host "Preparing a config template for CircleCI Runner Agent"
 @"
 api:
+  auth_token: "" # FIXME: Specify your runner token
   # On server, set url to the hostname of your server installation. For example,
   # url: https://circleci.example.com
 runner:
   name: "" # FIXME: Specify the name of this runner instance
-  resource_class:
-    token: "" # FIXME: Specify your runner token
-    working_directory: /var/opt/circleci/workdir
-    cleanup_working_directory: true
+  mode: single-task
+  task_agent_directory: $installDirPath\Agents
+  working_directory: $installDirPath\Workdir
+  cleanup_working_directory: true
+logging:
+  file: $installDirPath\circleci-runner.log
 "@ -replace "([^`r])`n", "`$1`r`n" | Out-File runner-agent-config.yaml -Encoding ascii
 
 # Open runner-agent-config.yaml for edit
