@@ -21,7 +21,7 @@ elif hash sha256sum 2>/dev/null; then
   echo "found sha256sum command"
   alias SHACMD="sha256sum"
 else
-  echo "shasum command found"
+  echo "shasum command not found"
   exit 1
 fi
 
