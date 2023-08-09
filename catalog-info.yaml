@@ -8,7 +8,7 @@ metadata:
   description: Files used in specific Runner installations, referenced in Runner Installation docs
   annotations:
     circleci.com/project-slug: github/CircleCI-Public/runner-installation-files
-    jira/project-key: ON-PREM
+    jira/project-key: ONPREM
     pagerduty.com/service-id: PM7SMHG
   links:
     - title: Documentation
