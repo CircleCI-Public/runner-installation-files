@@ -1,0 +1,26 @@
+# Learn more about these files at:
+# https://circleci.atlassian.net/l/cp/zvCUepEC
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: circle-storage
+  description: Files used in specific Runner installations, referenced in Runner Installation docs
+  annotations:
+    circleci.com/project-slug: github/CircleCI-Public/runner-installation-files
+    jira/project-key: ONPREM
+    pagerduty.com/service-id: PM7SMHG
+  links:
+    - title: Documentation
+      url: https://github.com/CircleCI-Public/runner-installation-files/blob/main/README.md
+      icon: docs
+    - title: Slack
+      url: 'slack://channel?team=T02519B3Z&id=CKCV4LZ8V'
+      icon: chat
+  tags:
+    - runner
+    - install files
+spec:
+  type: tool
+  lifecycle: production
+  owner: on-prem
