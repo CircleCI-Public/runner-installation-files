@@ -12,7 +12,7 @@ metadata:
     pagerduty.com/service-id: PM7SMHG
   links:
     - title: Documentation
-      url: https://github.com/CircleCI-Public/runner-installation-files/blob/onprem-45/README.md
+      url: https://github.com/CircleCI-Public/runner-installation-files/blob/main/README.md
       icon: docs
   tags:
     - runner
