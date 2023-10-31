@@ -13,6 +13,18 @@ fi
 echo "Setting up CircleCI Runner directories"
 sudo mkdir -p /var/opt/circleci /opt/circleci
 
+# Find appropriate hash cmd
+if hash shasum 2>/dev/null; then
+  echo "found shasum command"
+  alias SHACMD="shasum -a256"
+elif hash sha256sum 2>/dev/null; then
+  echo "found sha256sum command"
+  alias SHACMD="sha256sum"
+else
+  echo "shasum command not found"
+  exit 1
+fi
+
 # Downloading launch agent
 echo "Using CircleCI Launch Agent version ${agent_version}"
 echo "Downloading and verifying CircleCI Launch Agent Binary"
@@ -24,5 +36,5 @@ curl --compressed -L "${base_url}/${agent_version}/${file}" -o "${file}"
 
 # Verifying download
 echo "Verifying CircleCI Launch Agent download"
-grep "${file}" checksums.txt | sha256sum --check && chmod +x "${file}"
+grep "${file}" checksums.txt | SHACMD --check && chmod +x "${file}"
 sudo cp "${file}" "/opt/circleci/circleci-launch-agent" || echo "Invalid checksum for CircleCI Launch Agent, please try download again"
