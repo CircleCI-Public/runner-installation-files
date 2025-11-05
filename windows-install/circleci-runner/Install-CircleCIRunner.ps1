@@ -168,9 +168,12 @@ while (`$true) {
     $serviceName = "CircleCIRunner"
     $binaryPath = "powershell.exe -ExecutionPolicy Bypass -NoProfile -File `"$serviceWrapperPath`""
 
-    sc.exe create $serviceName binPath= $binaryPath start= auto DisplayName= "CircleCI Runner Agent"
+    # Create service with user account specified in the create command
+    $result = sc.exe create $serviceName binPath= $binaryPath start= auto DisplayName= "CircleCI Runner Agent" obj= ".\$username" password= $passwd
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to create service: $result"
+
     sc.exe description $serviceName "CircleCI self-hosted runner agent"
-    sc.exe config $serviceName obj= ".\$username" password= $passwd
 }
 else {
     # Configure scheduled tasks to run launch-agent
