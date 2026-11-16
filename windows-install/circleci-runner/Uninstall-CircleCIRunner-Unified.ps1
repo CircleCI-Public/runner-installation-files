@@ -6,7 +6,8 @@
 
 .DESCRIPTION
   Every step checks for what it removes and carries on if it is missing, so the script is safe
-  to re-run and to use after a partial install.
+  to re-run and to use after a partial install. It tries to remove both the service and the
+  autologon setup every time, so it cleans up whichever mode was used, even if that is not known.
 
 .PARAMETER Username
   The local user the runner runs as. Must match what the install script used.
@@ -21,9 +22,10 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Names follow the legacy script and the ONPREM-2636 prototype (service "CircleCIRunner", logon task
-# "CircleCI Runner Agent"). The session keeper task is legacy RDP only, listed so old installs clean up.
-# TODO(ONP-644/ONP-645): confirm against the unified install script once it is written.
+# The service name is the one the install script registers with -Service. The logon task names follow
+# the legacy script and the ONPREM-2636 prototype. The session keeper task is legacy RDP only, listed
+# so old installs clean up.
+# TODO(ONP-644): confirm the logon task names against the autologon install.
 $serviceName = "CircleCIRunner"
 $logonTaskNames = @("CircleCI Runner Agent", "CircleCI Runner Agent session keeper")
 $userDescription = "Created by the CircleCI Runner installer"
@@ -93,13 +95,70 @@ public struct LSA_OBJECT_ATTRIBUTES {
   }
 }
 
+# Removes the "Log on as a service" right the install script grants to the service account
+function Revoke-ServiceLogonRight([System.Security.Principal.SecurityIdentifier]$sid) {
+  if (-not ("CircleCI.LsaRights" -as [type])) {
+    Add-Type -Namespace CircleCI -Name LsaRights -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)]
+public struct LSA_UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
+[StructLayout(LayoutKind.Sequential)]
+public struct LSA_OBJECT_ATTRIBUTES {
+  public int Length; public IntPtr RootDirectory; public IntPtr ObjectName;
+  public int Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService;
+}
+[DllImport("advapi32.dll")] public static extern uint LsaOpenPolicy(IntPtr systemName, ref LSA_OBJECT_ATTRIBUTES attrs, uint access, out IntPtr handle);
+[DllImport("advapi32.dll")] public static extern uint LsaRemoveAccountRights(IntPtr handle, IntPtr sid, [MarshalAs(UnmanagedType.U1)] bool allRights, ref LSA_UNICODE_STRING rights, uint count);
+[DllImport("advapi32.dll")] public static extern uint LsaClose(IntPtr handle);
+[DllImport("advapi32.dll")] public static extern int LsaNtStatusToWinError(uint status);
+'@
+  }
+  $right = "SeServiceLogonRight"
+  $attrs = New-Object CircleCI.LsaRights+LSA_OBJECT_ATTRIBUTES
+  $attrs.Length = [System.Runtime.InteropServices.Marshal]::SizeOf($attrs)
+  $handle = [IntPtr]::Zero
+  $POLICY_CREATE_ACCOUNT_AND_LOOKUP_NAMES = 0x00000810  # POLICY_CREATE_ACCOUNT | POLICY_LOOKUP_NAMES
+  $status = [CircleCI.LsaRights]::LsaOpenPolicy([IntPtr]::Zero, [ref]$attrs, $POLICY_CREATE_ACCOUNT_AND_LOOKUP_NAMES, [ref]$handle)
+  if ($status -ne 0) { throw "LsaOpenPolicy failed: $([CircleCI.LsaRights]::LsaNtStatusToWinError($status))" }
+
+  $sidBytes = New-Object byte[] $sid.BinaryLength
+  $sid.GetBinaryForm($sidBytes, 0)
+  $sidBuffer = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($sidBytes.Length)
+  $nameBuffer = [System.Runtime.InteropServices.Marshal]::StringToHGlobalUni($right)
+  try {
+    [System.Runtime.InteropServices.Marshal]::Copy($sidBytes, 0, $sidBuffer, $sidBytes.Length)
+    $name = New-Object CircleCI.LsaRights+LSA_UNICODE_STRING
+    $name.Length = [uint16]($right.Length * 2)
+    $name.MaximumLength = [uint16](($right.Length + 1) * 2)
+    $name.Buffer = $nameBuffer
+    $status = [CircleCI.LsaRights]::LsaRemoveAccountRights($handle, $sidBuffer, $false, [ref]$name, 1)
+    # STATUS_OBJECT_NAME_NOT_FOUND (0xC0000034) means the user never had the right. It is written in
+    # decimal for the reason given in Remove-LsaSecret.
+    if ($status -ne 0 -and $status -ne [uint32]3221225524) {
+      throw "LsaRemoveAccountRights failed: $([CircleCI.LsaRights]::LsaNtStatusToWinError($status))"
+    }
+  }
+  finally {
+    [System.Runtime.InteropServices.Marshal]::FreeHGlobal($nameBuffer)
+    [System.Runtime.InteropServices.Marshal]::FreeHGlobal($sidBuffer)
+    [void][CircleCI.LsaRights]::LsaClose($handle)
+  }
+}
+
 Write-Host "Uninstalling CircleCI Runner (user: $Username, install dir: $resolvedInstallDir)"
 
-# Service mode
+# Service mode. This runs whichever mode was installed, and does nothing if there is no service.
 Invoke-Step "Stop and deregister the $serviceName Windows service" {
   $service = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
   if ($service) {
-    if ($service.Status -ne "Stopped") { Stop-Service -Name $serviceName -Force }
+    if ($service.Status -ne "Stopped") {
+      # The agent finishes its tasks before it stops. If it will not stop, carry on and deregister
+      # the service, and the step below stops the process.
+      try {
+        Stop-Service -Name $serviceName -Force
+        $service.WaitForStatus("Stopped", [TimeSpan]::FromSeconds(60))
+      }
+      catch { Write-Warning "  The service did not stop cleanly, its process is stopped below: $_" }
+    }
     sc.exe delete $serviceName | Out-Null
     if ($LASTEXITCODE -ne 0) { throw "sc.exe delete exited with $LASTEXITCODE" }
   }
@@ -176,7 +235,6 @@ Invoke-Step "Log off $Username" {
 }
 
 # Only remove the user if the install script created it, which it marks in the account description.
-# TODO(ONP-644/ONP-645): the install script must create the user with this exact description.
 Invoke-Step "Remove user $Username and its profile" {
   $user = Get-LocalUser -Name $Username -ErrorAction SilentlyContinue
   if (-not $user) { Write-Host "  User not found, skipping"; return }
@@ -184,6 +242,9 @@ Invoke-Step "Remove user $Username and its profile" {
     Write-Host "  User was not created by the install script, leaving it in place"
     return
   }
+  # A failure here is not worth keeping the user for
+  try { Revoke-ServiceLogonRight $user.SID }
+  catch { Write-Warning "  Could not remove the Log on as a service right: $_" }
   $profile = Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $user.SID.Value }
   if ($profile) { Remove-CimInstance -InputObject $profile }
   Remove-LocalUser -Name $Username
