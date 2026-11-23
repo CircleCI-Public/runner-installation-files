@@ -8,6 +8,8 @@
   Every step checks for what it removes and carries on if it is missing, so the script is safe
   to re-run and to use after a partial install. It tries to remove both the service and the
   autologon setup every time, so it cleans up whichever mode was used, even if that is not known.
+  The lock screen, screensaver and sleep settings are only restored if an autologon setup is found,
+  so a service install, which never changed them, leaves them as they were.
 
 .PARAMETER Username
   The local user the runner runs as. Must match what the install script used.
@@ -22,15 +24,14 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# The service name is the one the install script registers with -Service. The logon task names follow
-# the legacy script and the ONPREM-2636 prototype. The session keeper task is legacy RDP only, listed
-# so old installs clean up.
-# TODO(ONP-644): confirm the logon task names against the autologon install.
+# The service and the first logon task are named as the install script names them, with -Service and
+# -Autologon. The session keeper task is legacy RDP only, listed so old installs clean up.
 $serviceName = "CircleCIRunner"
 $logonTaskNames = @("CircleCI Runner Agent", "CircleCI Runner Agent session keeper")
 $userDescription = "Created by the CircleCI Runner installer"
 
 $failures = @()
+$profileCleanupPending = $false
 function Invoke-Step($description, [scriptblock]$action) {
   Write-Host $description
   try { & $action }
@@ -144,7 +145,39 @@ public struct LSA_OBJECT_ATTRIBUTES {
   }
 }
 
+# Registers a task that removes a user profile by its SID at the next startup, once Windows has let go of
+# it, and then removes itself. If the profile is still loaded then, or cannot be removed, the task stays
+# for the next startup. The commands are given encoded, so no quoting can break them.
+function Register-ProfileCleanup([string]$sid) {
+  $taskName = "CircleCI Runner Profile Cleanup $sid"
+  $commands = @"
+`$profile = Get-CimInstance Win32_UserProfile | Where-Object { `$_.SID -eq '$sid' }
+if (`$profile) {
+  if (`$profile.Loaded) { exit 1 }
+  Remove-CimInstance -InputObject `$profile
+}
+Unregister-ScheduledTask -TaskName '$taskName' -Confirm:`$false
+"@
+  $encoded = [Convert]::ToBase64String([System.Text.Encoding]::Unicode.GetBytes($commands))
+  $action = New-ScheduledTaskAction -Execute "powershell.exe" `
+    -Argument "-NoProfile -ExecutionPolicy Bypass -EncodedCommand $encoded"
+  $trigger = New-ScheduledTaskTrigger -AtStartup
+  # Wait a minute after startup, so the services the commands need are running
+  $trigger.Delay = "PT1M"
+  $principal = New-ScheduledTaskPrincipal -UserId "SYSTEM" -LogonType ServiceAccount -RunLevel Highest
+  $settings = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10)
+  [void](Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger -Principal $principal `
+    -Settings $settings -Force)
+}
+
 Write-Host "Uninstalling CircleCI Runner (user: $Username, install dir: $resolvedInstallDir)"
+
+# Whether autologon was set up, found before the steps below remove it. DefaultUserName alone is not
+# enough, because Windows also keeps the last user there.
+$winlogonKey = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+$winlogonValues = Get-ItemProperty -Path $winlogonKey -ErrorAction SilentlyContinue
+$autologonFound = [bool](Get-ScheduledTask -TaskName $logonTaskNames[0] -ErrorAction SilentlyContinue) -or
+  ($winlogonValues.AutoAdminLogon -eq "1" -and $winlogonValues.DefaultUserName -eq $Username)
 
 # Service mode. This runs whichever mode was installed, and does nothing if there is no service.
 Invoke-Step "Stop and deregister the $serviceName Windows service" {
@@ -200,12 +233,16 @@ Invoke-Step "Remove credentials saved by the legacy RDP flow" {
   cmdkey.exe /delete:TERMSRV/localhost | Out-Null
 }
 
-# ONP-644 stops the session locking or sleeping (screensaver, display timeout, sleep).
-# TODO(ONP-644): confirm the exact registry values and powercfg calls the install script uses
+# -Autologon stops the session locking or sleeping. It sets these policy values, and zero (never)
+# display and sleep timeouts with powercfg.
 Invoke-Step "Restore lock screen, screensaver and sleep settings" {
+  if (-not $autologonFound) {
+    Write-Host "  No autologon setup found, leaving the lock screen, screensaver and sleep settings alone"
+    return
+  }
   foreach ($policyKey in "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop",
                          "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization") {
-    foreach ($value in "ScreenSaveActive", "ScreenSaverIsSecure", "ScreenSaveTimeOut", "NoLockScreen") {
+    foreach ($value in "ScreenSaveActive", "ScreenSaverIsSecure", "NoLockScreen") {
       Remove-ItemProperty -Path $policyKey -Name $value -ErrorAction SilentlyContinue
     }
   }
@@ -245,7 +282,37 @@ Invoke-Step "Remove user $Username and its profile" {
   # A failure here is not worth keeping the user for
   try { Revoke-ServiceLogonRight $user.SID }
   catch { Write-Warning "  Could not remove the Log on as a service right: $_" }
-  $profile = Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $user.SID.Value }
+
+  # The installer created this user, so whatever still runs as it belongs to the runner or its jobs. A
+  # profile cannot be removed while it is loaded, which a running process keeps it.
+  $account = "$env:COMPUTERNAME\$Username"
+  Get-Process -IncludeUserName -ErrorAction SilentlyContinue |
+    Where-Object { $_.UserName -eq $account } |
+    Stop-Process -Force -ErrorAction SilentlyContinue
+
+  $sid = $user.SID.Value
+  $profile = Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $sid }
+  # Windows keeps a profile loaded for a moment after its last process stops
+  for ($i = 0; $i -lt 30 -and $profile -and $profile.Loaded; $i++) {
+    Start-Sleep -Seconds 1
+    $profile = Get-CimInstance Win32_UserProfile | Where-Object { $_.SID -eq $sid }
+  }
+  # Windows keeps the profile of a user that ran a service loaded after the service stops, with nothing
+  # using it, until the machine restarts. The user can be removed anyway, but the profile cannot be
+  # removed until it is unloaded, so a task removes it at the next startup. A reinstall before then
+  # works, and gets a profile folder with the machine name added to its name.
+  if ($profile -and $profile.Loaded) {
+    Remove-LocalUser -Name $Username
+    try { Register-ProfileCleanup $sid }
+    catch {
+      throw ("The user was removed, but a task to remove its profile folder at the next startup could " +
+        "not be registered. After a restart, remove the profile folder by hand: $_")
+    }
+    $script:profileCleanupPending = $true
+    Write-Host "  The profile of $Username is still loaded, which Windows only releases at a restart."
+    Write-Host "  The user is removed, and its profile folder will be removed at the next startup."
+    return
+  }
   if ($profile) { Remove-CimInstance -InputObject $profile }
   Remove-LocalUser -Name $Username
 }
@@ -264,3 +331,6 @@ if ($failures.Count -gt 0) {
   exit 1
 }
 Write-Host "CircleCI Runner uninstalled"
+if ($profileCleanupPending) {
+  Write-Host "The runner user's profile folder is removed at the next startup, so restart this machine at some point."
+}
