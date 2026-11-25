@@ -12,6 +12,11 @@
   boot after the other services, restarts if it fails, and starts it. The service needs a runner
   release that can run as a Windows service.
 
+  With -Autologon it instead sets this machine to sign in as that user at startup, and registers a
+  scheduled task that starts the runner at that sign-in, so the runner has a desktop session. It also
+  stops the session from locking or sleeping. The sign-in happens at the next restart, so restart the
+  machine to start the runner. -Service and -Autologon cannot be used together.
+
 .PARAMETER RunnerToken
   The runner authentication token.
 
@@ -27,14 +32,25 @@
 
 .PARAMETER Service
   Run the runner as a Windows service.
+
+.PARAMETER Autologon
+  Sign in as the runner user at startup and run the runner in that session. Autologon is one setting
+  for the whole machine, so the install stops if the machine already signs in as someone else.
+
+.PARAMETER AgentBinaryPath
+  Install this runner binary, a circleci-runner.exe for this machine's architecture, instead of
+  downloading the released one. For example, a build that has not been released yet. Nothing checks
+  that it is the right binary. Git and Gzip are still installed from the internet.
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = "InstallOnly")]
 param(
   [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$RunnerToken,
   [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$RunnerName,
   [string]$ApiUrl,
   [ValidateNotNullOrEmpty()][string]$Username = "circleci",
-  [switch]$Service
+  [Parameter(ParameterSetName = "Service")][switch]$Service,
+  [Parameter(ParameterSetName = "Autologon")][switch]$Autologon,
+  [ValidateScript({ Test-Path -LiteralPath $_ -PathType Leaf })][string]$AgentBinaryPath
 )
 
 # Returns a uniformly random integer in [0, $max) from a cryptographic generator. Get-Random is not
@@ -143,6 +159,53 @@ public struct LSA_OBJECT_ATTRIBUTES {
   }
 }
 
+# Stores an LSA secret. Windows reads the "DefaultPassword" secret for autologon, so the password does
+# not have to be left in plain text in the registry.
+function Set-LsaSecret([string]$name, [string]$value) {
+  if (-not ("CircleCI.LsaSecret" -as [type])) {
+    Add-Type -Namespace CircleCI -Name LsaSecret -MemberDefinition @'
+[StructLayout(LayoutKind.Sequential)]
+public struct LSA_UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
+[StructLayout(LayoutKind.Sequential)]
+public struct LSA_OBJECT_ATTRIBUTES {
+  public int Length; public IntPtr RootDirectory; public IntPtr ObjectName;
+  public int Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService;
+}
+[DllImport("advapi32.dll")] public static extern uint LsaOpenPolicy(IntPtr systemName, ref LSA_OBJECT_ATTRIBUTES attrs, uint access, out IntPtr handle);
+[DllImport("advapi32.dll")] public static extern uint LsaStorePrivateData(IntPtr handle, ref LSA_UNICODE_STRING keyName, ref LSA_UNICODE_STRING privateData);
+[DllImport("advapi32.dll")] public static extern uint LsaClose(IntPtr handle);
+[DllImport("advapi32.dll")] public static extern int LsaNtStatusToWinError(uint status);
+'@
+  }
+  $attrs = New-Object CircleCI.LsaSecret+LSA_OBJECT_ATTRIBUTES
+  $attrs.Length = [System.Runtime.InteropServices.Marshal]::SizeOf($attrs)
+  $handle = [IntPtr]::Zero
+  $POLICY_CREATE_SECRET = 0x00000020
+  $status = [CircleCI.LsaSecret]::LsaOpenPolicy([IntPtr]::Zero, [ref]$attrs, $POLICY_CREATE_SECRET, [ref]$handle)
+  if ($status -ne 0) { throw "LsaOpenPolicy failed: $([CircleCI.LsaSecret]::LsaNtStatusToWinError($status))" }
+
+  $nameBuffer = [System.Runtime.InteropServices.Marshal]::StringToHGlobalUni($name)
+  $valueBuffer = [System.Runtime.InteropServices.Marshal]::StringToHGlobalUni($value)
+  try {
+    $key = New-Object CircleCI.LsaSecret+LSA_UNICODE_STRING
+    $key.Length = [uint16]($name.Length * 2)
+    $key.MaximumLength = [uint16](($name.Length + 1) * 2)
+    $key.Buffer = $nameBuffer
+    $secret = New-Object CircleCI.LsaSecret+LSA_UNICODE_STRING
+    $secret.Length = [uint16]($value.Length * 2)
+    $secret.MaximumLength = [uint16](($value.Length + 1) * 2)
+    $secret.Buffer = $valueBuffer
+    $status = [CircleCI.LsaSecret]::LsaStorePrivateData($handle, [ref]$key, [ref]$secret)
+    if ($status -ne 0) { throw "LsaStorePrivateData failed: $([CircleCI.LsaSecret]::LsaNtStatusToWinError($status))" }
+  }
+  finally {
+    [System.Runtime.InteropServices.Marshal]::FreeHGlobal($nameBuffer)
+    # This one holds the password, so it is overwritten with zeros before it is freed
+    [System.Runtime.InteropServices.Marshal]::ZeroFreeGlobalAllocUnicode($valueBuffer)
+    [void][CircleCI.LsaSecret]::LsaClose($handle)
+  }
+}
+
 $ErrorActionPreference = "Stop"
 
 # The runner rejects any other characters in its name
@@ -150,12 +213,29 @@ if ($RunnerName -notmatch '^[A-Za-z0-9.()_ -]+$') {
   throw "RunnerName must contain only letters, numbers, .()_-, and spaces"
 }
 
+# A relative path is resolved here, because the script changes directory before it uses the path
+if ($AgentBinaryPath) { $AgentBinaryPath = (Resolve-Path -LiteralPath $AgentBinaryPath).ProviderPath }
+
+$winlogon = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
+
+# Autologon is one setting for the whole machine, so stop before changing anything if it is already in
+# use for someone else. DefaultUserName alone is not autologon, because Windows also keeps the last user there.
+if ($Autologon) {
+  $current = Get-ItemProperty -Path $winlogon
+  if ($current.AutoAdminLogon -eq "1" -and $current.DefaultUserName -ne $Username) {
+    throw ("This machine is already set to sign in as $($current.DefaultUserName) at startup. " +
+      "Autologon is one setting for the whole machine, so -Autologon would replace it. " +
+      "Remove that autologon first, or use -Service instead.")
+  }
+}
+
 $arch = Get-NativeArchitecture
 $installDirPath = "$env:ProgramFiles\CircleCI"
 # The uninstall script only removes the user if it finds this description, so keep the two in sync
 $userDescription = "Created by the CircleCI Runner installer"
-# The uninstall script removes the service by this name
+# The uninstall script removes the service and the logon task by these names
 $serviceName = "CircleCIRunner"
+$logonTaskName = "CircleCI Runner Agent"
 
 Write-Host "Detected native architecture: $arch"
 
@@ -180,28 +260,36 @@ Write-Host "Installing CircleCI Runner Agent to $installDirPath"
 [void](New-Item "$installDirPath" -ItemType Directory -Force)
 Push-Location "$installDirPath"
 
-# Download CircleCI runner agent binary
-$manifestDist = "https://circleci-binary-releases.s3.amazonaws.com/circleci-runner/manifest.json"
-Write-Host "Determining current version of CircleCI Runner Agent"
-$windowsManifest = (Invoke-RestMethod -Uri "$manifestDist").releases.current.windows.$arch
-if (-not $windowsManifest) {
-  throw "No CircleCI Runner Agent release is available for windows/$arch"
+if ($AgentBinaryPath) {
+  # The binary the caller gave is installed in place of the released one
+  Write-Host "Installing the CircleCI Runner Agent binary at $AgentBinaryPath"
+  $agentFile = "circleci-runner"
+  Copy-Item -LiteralPath $AgentBinaryPath -Destination "$installDirPath\$agentFile.exe" -Force
 }
-Write-Host "Downloading and verifying CircleCI Runner Agent binary"
-$downloadUrl = $windowsManifest.url
-$agentHash = $windowsManifest.sha256
-Write-Host "Download URL: $downloadUrl"
-Write-Host "SHA256 hash: $agentHash"
-$tarFile = $downloadUrl.split("/")[-1]
-$agentFile = $tarFile.split("_")[0]
-Write-Host "Downloading CircleCI Runner Agent binary archive: $tarFile"
-Invoke-WebRequest "$downloadUrl" -OutFile "$tarFile" -UseBasicParsing
-Write-Host "Verifying CircleCI Runner Agent binary download"
-if ((Get-FileHash "$tarFile" -Algorithm SHA256).Hash.ToLower() -ne $agentHash.ToLower()) {
-    throw "Invalid checksum for CircleCI Runner Agent binary, please try download again"
+else {
+  # Download CircleCI runner agent binary
+  $manifestDist = "https://circleci-binary-releases.s3.amazonaws.com/circleci-runner/manifest.json"
+  Write-Host "Determining current version of CircleCI Runner Agent"
+  $windowsManifest = (Invoke-RestMethod -Uri "$manifestDist").releases.current.windows.$arch
+  if (-not $windowsManifest) {
+    throw "No CircleCI Runner Agent release is available for windows/$arch"
+  }
+  Write-Host "Downloading and verifying CircleCI Runner Agent binary"
+  $downloadUrl = $windowsManifest.url
+  $agentHash = $windowsManifest.sha256
+  Write-Host "Download URL: $downloadUrl"
+  Write-Host "SHA256 hash: $agentHash"
+  $tarFile = $downloadUrl.split("/")[-1]
+  $agentFile = $tarFile.split("_")[0]
+  Write-Host "Downloading CircleCI Runner Agent binary archive: $tarFile"
+  Invoke-WebRequest "$downloadUrl" -OutFile "$tarFile" -UseBasicParsing
+  Write-Host "Verifying CircleCI Runner Agent binary download"
+  if ((Get-FileHash "$tarFile" -Algorithm SHA256).Hash.ToLower() -ne $agentHash.ToLower()) {
+      throw "Invalid checksum for CircleCI Runner Agent binary, please try download again"
+  }
+  tar -xvf "$tarFile"
+  Remove-Item "$tarFile"
 }
-tar -xvf "$tarFile"
-Remove-Item "$tarFile"
 
 # NT credentials to use
 Write-Host "Generating a random password"
@@ -280,5 +368,68 @@ if ($Service) {
       "start, check that this runner release can run as a Windows service.")
   }
   Write-Host "CircleCI Runner Agent is running as the $serviceName Windows service"
+  Write-Host ""
+}
+
+if ($Autologon) {
+  Write-Host "Setting this machine to sign in as $Username at startup and start the runner at that sign-in"
+  try {
+    $agentPath = "$installDirPath\$agentFile.exe"
+    if (-not (Test-Path -LiteralPath $agentPath)) { throw "$agentPath was not found" }
+
+    # The password is set before autologon is turned on, so there is never autologon without one. It is
+    # kept as an LSA secret, so any plain text DefaultPassword value, and a count that would end autologon
+    # after a few sign-ins, are removed.
+    Set-LsaSecret "DefaultPassword" $passwd
+    Remove-ItemProperty -Path $winlogon -Name DefaultPassword, AutoLogonCount -ErrorAction SilentlyContinue
+    Set-ItemProperty -Path $winlogon -Name DefaultUserName -Value $Username -Type String
+    Set-ItemProperty -Path $winlogon -Name DefaultDomainName -Value $env:COMPUTERNAME -Type String
+    Set-ItemProperty -Path $winlogon -Name AutoAdminLogon -Value "1" -Type String
+
+    # Start the runner whenever the user signs in. The run level is Highest so the session has the user's
+    # full administrator token, which an ordinary sign-in does not give. The task has no time limit, is not
+    # stopped on battery, and runs at normal priority (4 to 6 are normal, the default of 7 is below normal).
+    #
+    # The task also repeats every minute and ignores a new start while the runner is up, so a runner that
+    # exits for any reason is started again within a minute. Task Scheduler's own restart on failure does
+    # not do that: it does not restart a runner that was killed, and leaves the task ready with an exit
+    # code of -1. It stays on for a task that fails to start. The repetition lasts ten years from each
+    # sign-in, which is endless in practice, and does not stop a runner that is running at the end of it.
+    $account = "$env:COMPUTERNAME\$Username"
+    $action = New-ScheduledTaskAction -Execute $agentPath -Argument "machine --config `"$configPath`"" `
+      -WorkingDirectory $installDirPath
+    $trigger = New-ScheduledTaskTrigger -AtLogOn -User $account
+    $repeat = New-ScheduledTaskTrigger -Once -At (Get-Date) -RepetitionInterval (New-TimeSpan -Minutes 1) `
+      -RepetitionDuration (New-TimeSpan -Days 3650)
+    $trigger.Repetition = $repeat.Repetition
+    $trigger.Repetition.StopAtDurationEnd = $false
+    $principal = New-ScheduledTaskPrincipal -UserId $account -LogonType Interactive -RunLevel Highest
+    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
+      -ExecutionTimeLimit ([TimeSpan]::Zero) -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) `
+      -MultipleInstances IgnoreNew -Priority 4
+    [void](Register-ScheduledTask -TaskName $logonTaskName -Action $action -Trigger $trigger `
+      -Principal $principal -Settings $settings -Force)
+
+    # Keep the session available for UI tests: the display and the machine never turn off or sleep, and
+    # there is no screensaver or lock screen. A zero timeout means never. The policy keys are created
+    # only if they are missing, because New-Item -Force on a key that exists is not safe for its values.
+    foreach ($setting in "monitor-timeout-ac", "monitor-timeout-dc", "standby-timeout-ac", "standby-timeout-dc") {
+      powercfg.exe /change $setting 0
+      if ($LASTEXITCODE -ne 0) { throw "Failed to set $setting (powercfg.exe exited with $LASTEXITCODE)" }
+    }
+    $desktopPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Control Panel\Desktop"
+    if (-not (Test-Path -LiteralPath $desktopPolicy)) { [void](New-Item -Path $desktopPolicy -Force) }
+    Set-ItemProperty -Path $desktopPolicy -Name ScreenSaveActive -Value "0" -Type String
+    Set-ItemProperty -Path $desktopPolicy -Name ScreenSaverIsSecure -Value "0" -Type String
+    $personalizationPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
+    if (-not (Test-Path -LiteralPath $personalizationPolicy)) { [void](New-Item -Path $personalizationPolicy -Force) }
+    Set-ItemProperty -Path $personalizationPolicy -Name NoLockScreen -Value 1 -Type DWord
+  }
+  catch {
+    throw ("Failed to set up autologon: $_`n" +
+      "Run Uninstall-CircleCIRunner-Unified.ps1 to clean up before trying again.")
+  }
+  Write-Host "This machine is set to sign in as $Username at startup, and the runner starts at that sign-in."
+  Write-Host "Restart this machine to start the runner."
   Write-Host ""
 }
